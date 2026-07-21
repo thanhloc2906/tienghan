@@ -1,0 +1,891 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { 
+  User, BookOpen, Brain, Cloud, Upload, Download, Copy, Check, 
+  Moon, Sun, Volume2, VolumeX, Eye, EyeOff, RotateCcw, 
+  Zap, LogOut, Plus, Trash2, RefreshCw, AlertCircle, Target,
+  ChevronRight, ChevronLeft, FlipHorizontal, CheckCircle, XCircle
+} from 'lucide-react';
+
+// ============================
+// CONSTANTS & CONFIG
+// ============================
+const GEMINI_API_KEY = 'AIzaSyD-7kM8v5nKzP2YXnOxYbNLM9tZ0HbVqYQ'; // Thay bằng API key của bạn
+const JSONBIN_MASTER_KEY = '$2a$10$nBUoZcVzuJ/ZPjOj7jfjkO.Ap22H8Ui6SscwJTpQXIpk4SxzSucIu';
+const JSONBIN_BASE_URL = 'https://api.jsonbin.io/v3/b';
+
+const DEFAULT_VOCAB = [
+  { id: '1', vi: 'quốc gia', ko: '국가', en: 'country', roman: 'gukga', topic: 'Địa lý', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '2', vi: 'học sinh', ko: '학생', en: 'student', roman: 'haksaeng', topic: 'Trường học', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '3', vi: 'giáo viên', ko: '선생님', en: 'teacher', roman: 'seonsaengnim', topic: 'Trường học', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '4', vi: 'cơm', ko: '밥', en: 'rice', roman: 'bap', topic: 'Ẩm thực', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '5', vi: 'quả táo', ko: '사과', en: 'apple', roman: 'sagwa', topic: 'Ẩm thực', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '6', vi: 'bác sĩ', ko: '의사', en: 'doctor', roman: 'uisa', topic: 'Nghề nghiệp', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '7', vi: 'máy tính', ko: '컴퓨터', en: 'computer', roman: 'keompyuteo', topic: 'Công nghệ', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+  { id: '8', vi: 'điện thoại', ko: '전화기', en: 'telephone', roman: 'jeonhwagi', topic: 'Công nghệ', level: 0, nextReview: Date.now(), addedAt: Date.now() },
+];
+
+const INTERVALS = [1 * 60 * 1000, 10 * 60 * 1000, 24 * 60 * 60 * 1000, 3 * 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000]; // in milliseconds
+
+// ============================
+// MAIN APP COMPONENT
+// ============================
+export default function App() {
+  // AUTH STATE
+  const [userId, setUserId] = useState('');
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [tempUserId, setTempUserId] = useState('');
+
+  // APP STATE
+  const [vocabList, setVocabList] = useState([]);
+  const [currentView, setCurrentView] = useState('dashboard'); // dashboard, mcq, flashcard, ai_add, ai_path
+  const [darkMode, setDarkMode] = useState(false);
+  const [autoSpeak, setAutoSpeak] = useState(true);
+  const [showRoman, setShowRoman] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const [toast, setToast] = useState(null);
+
+  // LEARNING SESSION STATE
+  const [sessionWords, setSessionWords] = useState([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [sessionType, setSessionType] = useState('mcq'); // mcq or flashcard
+  const [mcqOptions, setMcqOptions] = useState([]);
+  const [selectedAnswer, setSelectedAnswer] = useState(null);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [sessionStats, setSessionStats] = useState({ correct: 0, wrong: 0, total: 0 });
+
+  // AI & CLOUD STATE
+  const [aiInput, setAiInput] = useState('');
+  const [aiResult, setAiResult] = useState(null);
+  const [aiPathAnalysis, setAiPathAnalysis] = useState('');
+  const [binId, setBinId] = useState('');
+  const [jsonImportStr, setJsonImportStr] = useState('');
+
+  // REFS
+  const synthRef = useRef(window.speechSynthesis);
+
+  // ============================
+  // LOCAL STORAGE PERSISTENCE
+  // ============================
+  useEffect(() => {
+    if (userId) {
+      const savedData = localStorage.getItem(`korean_vocab_${userId}`);
+      if (savedData) {
+        try {
+          const parsed = JSON.parse(savedData);
+          setVocabList(parsed.vocab || DEFAULT_VOCAB);
+          setDarkMode(parsed.darkMode || false);
+          setAutoSpeak(parsed.autoSpeak !== undefined ? parsed.autoSpeak : true);
+          setShowRoman(parsed.showRoman !== undefined ? parsed.showRoman : true);
+          setBinId(parsed.binId || '');
+        } catch (e) {
+          setVocabList(DEFAULT_VOCAB);
+        }
+      } else {
+        setVocabList(DEFAULT_VOCAB);
+      }
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    if (userId && vocabList.length > 0) {
+      const dataToSave = {
+        vocab: vocabList,
+        darkMode,
+        autoSpeak,
+        showRoman,
+        binId,
+      };
+      localStorage.setItem(`korean_vocab_${userId}`, JSON.stringify(dataToSave));
+    }
+  }, [vocabList, darkMode, autoSpeak, showRoman, binId, userId]);
+
+  // ============================
+  // TOAST HELPER
+  // ============================
+  const showToast = (message, type = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  // ============================
+  // SPEECH SYNTHESIS
+  // ============================
+  const speak = (text, lang = 'ko-KR') => {
+    if (synthRef.current.speaking) {
+      synthRef.current.cancel();
+    }
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = lang;
+    utterance.rate = 0.9;
+    synthRef.current.speak(utterance);
+  };
+
+  // ============================
+  // SPACED REPETITION LOGIC
+  // ============================
+  const updateWordLevel = (wordId, isCorrect) => {
+    setVocabList(prev => prev.map(word => {
+      if (word.id !== wordId) return word;
+      let newLevel = isCorrect ? word.level + 1 : 0;
+      if (newLevel >= INTERVALS.length) newLevel = INTERVALS.length - 1;
+      const interval = isCorrect ? INTERVALS[Math.min(newLevel, INTERVALS.length-1)] : INTERVALS[0] / 10; // reset về 1 phút nếu sai
+      return {
+        ...word,
+        level: newLevel,
+        nextReview: Date.now() + interval,
+      };
+    }));
+  };
+
+  const getWordsForReview = useCallback(() => {
+    const now = Date.now();
+    const dueWords = vocabList.filter(w => w.nextReview <= now);
+    const otherWords = vocabList.filter(w => w.nextReview > now);
+    // Shuffle each group
+    const shuffle = (arr) => arr.sort(() => Math.random() - 0.5);
+    // Prioritize due words
+    return [...shuffle(dueWords), ...shuffle(otherWords)];
+  }, [vocabList]);
+
+  // ============================
+  // SESSION MANAGEMENT
+  // ============================
+  const startSession = (type) => {
+    const words = getWordsForReview();
+    if (words.length === 0) {
+      showToast('Không có từ vựng nào để ôn tập. Hãy thêm từ mới!', 'warning');
+      return;
+    }
+    setSessionWords(words);
+    setCurrentIndex(0);
+    setSessionType(type);
+    setSelectedAnswer(null);
+    setIsFlipped(false);
+    setSessionStats({ correct: 0, wrong: 0, total: words.length });
+    if (type === 'mcq') {
+      generateMcqOptions(words[0], words);
+    }
+    setCurrentView(type);
+    if (autoSpeak && type === 'flashcard') {
+      speak(words[0].ko);
+    }
+  };
+
+  const generateMcqOptions = (currentWord, allWords) => {
+    const otherWords = allWords.filter(w => w.id !== currentWord.id);
+    const shuffledOthers = otherWords.sort(() => Math.random() - 0.5).slice(0, 3);
+    const options = [currentWord, ...shuffledOthers].sort(() => Math.random() - 0.5);
+    setMcqOptions(options);
+  };
+
+  const handleMcqAnswer = (wordId) => {
+    if (selectedAnswer) return; // already answered
+    const currentWord = sessionWords[currentIndex];
+    const isCorrect = wordId === currentWord.id;
+    setSelectedAnswer(wordId);
+    
+    updateWordLevel(currentWord.id, isCorrect);
+    
+    setSessionStats(prev => ({
+      ...prev,
+      correct: prev.correct + (isCorrect ? 1 : 0),
+      wrong: prev.wrong + (isCorrect ? 0 : 1),
+    }));
+
+    if (isCorrect && autoSpeak) {
+      speak(currentWord.ko);
+    }
+
+    // Delay to next word
+    setTimeout(() => {
+      if (currentIndex < sessionWords.length - 1) {
+        const nextIndex = currentIndex + 1;
+        setCurrentIndex(nextIndex);
+        setSelectedAnswer(null);
+        generateMcqOptions(sessionWords[nextIndex], vocabList);
+      } else {
+        finishSession();
+      }
+    }, 800);
+  };
+
+  const handleFlashcardResult = (isCorrect) => {
+    const currentWord = sessionWords[currentIndex];
+    updateWordLevel(currentWord.id, isCorrect);
+    
+    setSessionStats(prev => ({
+      ...prev,
+      correct: prev.correct + (isCorrect ? 1 : 0),
+      wrong: prev.wrong + (isCorrect ? 0 : 1),
+    }));
+
+    if (currentIndex < sessionWords.length - 1) {
+      const nextIndex = currentIndex + 1;
+      setCurrentIndex(nextIndex);
+      setIsFlipped(false);
+      if (autoSpeak) speak(sessionWords[nextIndex].ko);
+    } else {
+      finishSession();
+    }
+  };
+
+  const flipCard = () => {
+    setIsFlipped(!isFlipped);
+    if (!isFlipped && autoSpeak) {
+      speak(sessionWords[currentIndex].ko);
+    }
+  };
+
+  const finishSession = () => {
+    setCurrentView('dashboard');
+    showToast(`Hoàn thành! Đúng: ${sessionStats.correct}/${sessionStats.total}`, 'success');
+  };
+
+  // ============================
+  // AI FUNCTIONS (GEMINI)
+  // ============================
+  const callGeminiAPI = async (prompt) => {
+    setLoading(true);
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+          }),
+        }
+      );
+      const data = await response.json();
+      if (data.candidates && data.candidates[0]?.content?.parts[0]?.text) {
+        return data.candidates[0].content.parts[0].text;
+      }
+      throw new Error('No valid response');
+    } catch (error) {
+      console.error('Gemini API error:', error);
+      showToast('Lỗi kết nối AI. Vui lòng thử lại.', 'error');
+      return null;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAIAddWord = async () => {
+    if (!aiInput.trim()) return;
+    setLoading(true);
+    const prompt = `Hãy dịch từ/cụm từ tiếng Việt "${aiInput}" sang tiếng Hàn. Trả về CHÍNH XÁC định dạng JSON sau, không thêm bất kỳ text nào khác:
+{
+  "vi": "${aiInput}",
+  "ko": "từ tiếng Hàn",
+  "en": "nghĩa tiếng Anh",
+  "roman": "phiên âm Latin chuẩn (không dấu cách thừa)",
+  "topic": "Chủ đề phù hợp (ví dụ: Ẩm thực, Nghề nghiệp, Trường học, Địa lý, Công nghệ, Gia đình, Sức khỏe, Du lịch)"
+}`;
+
+    const resultText = await callGeminiAPI(prompt);
+    if (resultText) {
+      try {
+        // Clean up possible markdown code blocks
+        const cleanJson = resultText.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(cleanJson);
+        const newWord = {
+          id: Date.now().toString(),
+          vi: parsed.vi,
+          ko: parsed.ko,
+          en: parsed.en,
+          roman: parsed.roman,
+          topic: parsed.topic || 'Khác',
+          level: 0,
+          nextReview: Date.now(),
+          addedAt: Date.now(),
+        };
+        setVocabList(prev => [...prev, newWord]);
+        setAiInput('');
+        setAiResult(newWord);
+        showToast('Đã thêm từ mới thành công!', 'success');
+      } catch (e) {
+        showToast('Không thể phân tích phản hồi từ AI. Hãy thử lại.', 'error');
+      }
+    }
+    setLoading(false);
+  };
+
+  const handleAIPathAnalysis = async () => {
+    setLoading(true);
+    const stats = {
+      totalWords: vocabList.length,
+      topics: [...new Set(vocabList.map(w => w.topic))],
+      levels: vocabList.reduce((acc, w) => {
+        acc[w.level] = (acc[w.level] || 0) + 1;
+        return acc;
+      }, {}),
+      masteredCount: vocabList.filter(w => w.level >= 3).length,
+    };
+
+    const prompt = `Dựa trên dữ liệu học tiếng Hàn của người dùng: ${JSON.stringify(stats)}. Hãy viết một phân tích ngắn gọn (khoảng 150-200 từ) bao gồm:
+- Nhận xét tiến độ hiện tại.
+- Gợi ý thời gian học hiệu quả mỗi ngày.
+- Đề xuất 2-3 chủ đề nên học tiếp theo để cân bằng kỹ năng.
+Sử dụng tiếng Việt, giọng thân thiện, khích lệ.`;
+
+    const analysis = await callGeminiAPI(prompt);
+    if (analysis) {
+      setAiPathAnalysis(analysis);
+    }
+    setLoading(false);
+  };
+
+  // ============================
+  // CLOUD SYNC (JSONBin.io)
+  // ============================
+  const pushToCloud = async () => {
+    if (!binId) {
+      showToast('Vui lòng nhập Bin ID để tải lên.', 'warning');
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(`${JSONBIN_BASE_URL}/${binId}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Master-Key': JSONBIN_MASTER_KEY,
+        },
+        body: JSON.stringify({ vocab: vocabList, settings: { darkMode, autoSpeak, showRoman } }),
+      });
+      if (response.ok) {
+        showToast('Đã đồng bộ lên đám mây thành công!', 'success');
+      } else {
+        throw new Error('Upload failed');
+      }
+    } catch (error) {
+      showToast('Lỗi tải lên. Kiểm tra Bin ID và kết nối mạng.', 'error');
+    }
+    setLoading(false);
+  };
+
+  const pullFromCloud = async () => {
+    if (!binId) {
+      showToast('Vui lòng nhập Bin ID để tải về.', 'warning');
+      return;
+    }
+    setLoading(true);
+    try {
+      const response = await fetch(`${JSONBIN_BASE_URL}/${binId}/latest`, {
+        headers: { 'X-Master-Key': JSONBIN_MASTER_KEY },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const record = data.record;
+        if (record.vocab) {
+          setVocabList(record.vocab);
+          if (record.settings) {
+            setDarkMode(record.settings.darkMode || false);
+            setAutoSpeak(record.settings.autoSpeak !== undefined ? record.settings.autoSpeak : true);
+            setShowRoman(record.settings.showRoman !== undefined ? record.settings.showRoman : true);
+          }
+          showToast('Đã tải dữ liệu từ đám mây thành công!', 'success');
+        }
+      } else {
+        throw new Error('Download failed');
+      }
+    } catch (error) {
+      showToast('Lỗi tải về. Kiểm tra Bin ID.', 'error');
+    }
+    setLoading(false);
+  };
+
+  const copyToClipboard = () => {
+    const data = JSON.stringify({ vocab: vocabList, settings: { darkMode, autoSpeak, showRoman } });
+    navigator.clipboard.writeText(data).then(() => {
+      showToast('Đã sao chép dữ liệu vào clipboard!', 'success');
+    });
+  };
+
+  const importFromClipboard = () => {
+    try {
+      const data = JSON.parse(jsonImportStr);
+      if (data.vocab) {
+        setVocabList(data.vocab);
+        if (data.settings) {
+          setDarkMode(data.settings.darkMode || false);
+          setAutoSpeak(data.settings.autoSpeak !== undefined ? data.settings.autoSpeak : true);
+          setShowRoman(data.settings.showRoman !== undefined ? data.settings.showRoman : true);
+        }
+        setJsonImportStr('');
+        showToast('Đã nhập dữ liệu thành công!', 'success');
+      }
+    } catch (e) {
+      showToast('Chuỗi JSON không hợp lệ.', 'error');
+    }
+  };
+
+  // ============================
+  // LOGIN / LOGOUT
+  // ============================
+  const handleLogin = () => {
+    if (tempUserId.trim().length >= 2) {
+      setUserId(tempUserId.trim());
+      setIsLoggedIn(true);
+      setCurrentView('dashboard');
+    } else {
+      showToast('Vui lòng nhập User ID ít nhất 2 ký tự.', 'warning');
+    }
+  };
+
+  const handleLogout = () => {
+    setUserId('');
+    setIsLoggedIn(false);
+    setTempUserId('');
+    setCurrentView('dashboard');
+    setVocabList([]);
+  };
+
+  // ============================
+  // DARK MODE TOGGLE
+  // ============================
+  const toggleDarkMode = () => setDarkMode(!darkMode);
+
+  // ============================
+  // RENDER: LOGIN SCREEN
+  // ============================
+  if (!isLoggedIn) {
+    return (
+      <div className={`min-h-screen flex items-center justify-center p-4 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gradient-to-br from-blue-50 to-white'}`}>
+        <div className={`w-full max-w-md p-8 rounded-3xl shadow-2xl ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+          <div className="flex flex-col items-center mb-8">
+            <div className="w-20 h-20 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center mb-4 transform rotate-12">
+              <BookOpen className="w-10 h-10 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold">Hệ Sinh Thái Học Tiếng Hàn AI</h1>
+            <p className={`text-sm mt-2 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Đăng nhập để bắt đầu hành trình</p>
+          </div>
+          <div className="space-y-4">
+            <input
+              type="text"
+              placeholder="Nhập User ID (VD: tuan123)"
+              value={tempUserId}
+              onChange={(e) => setTempUserId(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              className={`w-full px-4 py-3 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 ${darkMode ? 'bg-gray-700 border-gray-600 text-white placeholder-gray-400' : 'bg-white border-gray-200'}`}
+            />
+            <button
+              onClick={handleLogin}
+              className="w-full py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl font-semibold hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+            >
+              <User className="w-5 h-5" /> Vào Ứng Dụng
+            </button>
+          </div>
+          <p className={`text-xs text-center mt-6 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Dữ liệu được lưu riêng trên trình duyệt của bạn</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ============================
+  // RENDER: MAIN APPLICATION
+  // ============================
+  return (
+    <div className={`min-h-screen pb-20 ${darkMode ? 'bg-gray-900 text-white' : 'bg-gray-50 text-gray-800'}`}>
+      {/* TOAST NOTIFICATION */}
+      {toast && (
+        <div className={`fixed top-4 right-4 left-4 z-50 p-4 rounded-xl shadow-lg flex items-center gap-3 transition-all ${
+          toast.type === 'success' ? 'bg-green-500 text-white' : 
+          toast.type === 'error' ? 'bg-red-500 text-white' : 
+          'bg-yellow-500 text-white'
+        }`}>
+          {toast.type === 'success' ? <CheckCircle className="w-5 h-5" /> : <AlertCircle className="w-5 h-5" />}
+          <span className="flex-1">{toast.message}</span>
+          <button onClick={() => setToast(null)} className="ml-auto"><XCircle className="w-5 h-5" /></button>
+        </div>
+      )}
+
+      {/* HEADER */}
+      <header className={`p-4 flex items-center justify-between ${darkMode ? 'bg-gray-800' : 'bg-white shadow-sm'}`}>
+        <div className="flex items-center gap-2">
+          <Brain className="w-6 h-6 text-purple-600" />
+          <span className="font-bold text-lg">Hàn AI</span>
+          <span className="text-xs opacity-70">{userId}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={toggleDarkMode} className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+            {darkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+          </button>
+          <button onClick={handleLogout} className={`p-2 rounded-lg ${darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}>
+            <LogOut className="w-5 h-5" />
+          </button>
+        </div>
+      </header>
+
+       {/* MAIN CONTENT AREA */}
+      <main className="p-4 max-w-2xl mx-auto">
+        {currentView === 'dashboard' && (
+          <DashboardView 
+            vocabList={vocabList}
+            darkMode={darkMode}
+            autoSpeak={autoSpeak}
+            setAutoSpeak={setAutoSpeak}
+            showRoman={showRoman}
+            setShowRoman={setShowRoman}
+            startSession={startSession}
+            setCurrentView={setCurrentView}
+            showToast={showToast}
+          />
+        )}
+
+        {currentView === 'mcq' && (
+          <McqView 
+            sessionWords={sessionWords}
+            currentIndex={currentIndex}
+            mcqOptions={mcqOptions}
+            selectedAnswer={selectedAnswer}
+            handleMcqAnswer={handleMcqAnswer}
+            sessionStats={sessionStats}
+            darkMode={darkMode}
+            setCurrentView={setCurrentView}
+          />
+        )}
+
+        {currentView === 'flashcard' && (
+          <FlashcardView 
+            sessionWords={sessionWords}
+            currentIndex={currentIndex}
+            isFlipped={isFlipped}
+            flipCard={flipCard}
+            handleFlashcardResult={handleFlashcardResult}
+            sessionStats={sessionStats}
+            darkMode={darkMode}
+            showRoman={showRoman}
+            speak={speak}
+            autoSpeak={autoSpeak}
+            setCurrentView={setCurrentView}
+          />
+        )}
+
+        {currentView === 'ai_add' && (
+          <AiAddView 
+            aiInput={aiInput}
+            setAiInput={setAiInput}
+            handleAIAddWord={handleAIAddWord}
+            aiResult={aiResult}
+            loading={loading}
+            darkMode={darkMode}
+            setCurrentView={setCurrentView}
+          />
+        )}
+
+        {currentView === 'ai_path' && (
+          <AiPathView 
+            vocabList={vocabList}
+            handleAIPathAnalysis={handleAIPathAnalysis}
+            aiPathAnalysis={aiPathAnalysis}
+            loading={loading}
+            darkMode={darkMode}
+            setCurrentView={setCurrentView}
+          />
+        )}
+
+        {currentView === 'cloud' && (
+          <CloudSyncView 
+            binId={binId}
+            setBinId={setBinId}
+            pushToCloud={pushToCloud}
+            pullFromCloud={pullFromCloud}
+            copyToClipboard={copyToClipboard}
+            jsonImportStr={jsonImportStr}
+            setJsonImportStr={setJsonImportStr}
+            importFromClipboard={importFromClipboard}
+            loading={loading}
+            darkMode={darkMode}
+            setCurrentView={setCurrentView}
+          />
+        )}
+      </main>
+
+      {/* BOTTOM NAVIGATION */}
+      <nav className={`fixed bottom-0 left-0 right-0 p-2 border-t ${darkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200'}`}>
+        <div className="flex justify-around items-center max-w-2xl mx-auto">
+          <NavItem icon={<BookOpen />} label="Học" active={currentView === 'dashboard'} onClick={() => setCurrentView('dashboard')} />
+          <NavItem icon={<Brain />} label="AI Thêm" active={currentView === 'ai_add'} onClick={() => setCurrentView('ai_add')} />
+          <NavItem icon={<Target />} label="Lộ Trình" active={currentView === 'ai_path'} onClick={() => setCurrentView('ai_path')} />
+          <NavItem icon={<Cloud />} label="Đám Mây" active={currentView === 'cloud'} onClick={() => setCurrentView('cloud')} />
+        </div>
+      </nav>
+    </div>
+  );
+}
+
+// ============================
+// SUB-COMPONENTS
+// ============================
+function DashboardView({ vocabList, darkMode, autoSpeak, setAutoSpeak, showRoman, setShowRoman, startSession, setCurrentView, showToast }) {
+  const dueCount = vocabList.filter(w => w.nextReview <= Date.now()).length;
+  return (
+    <div className="space-y-6">
+      <div className={`p-6 rounded-3xl ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <h2 className="text-xl font-bold mb-2">Xin chào! 👋</h2>
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div className={`p-4 rounded-2xl ${darkMode ? 'bg-gray-700' : 'bg-blue-50'}`}>
+            <p className="text-3xl font-bold text-blue-600">{vocabList.length}</p>
+            <p className="text-sm opacity-70">Từ vựng</p>
+          </div>
+          <div className={`p-4 rounded-2xl ${darkMode ? 'bg-gray-700' : 'bg-orange-50'}`}>
+            <p className="text-3xl font-bold text-orange-600">{dueCount}</p>
+            <p className="text-sm opacity-70">Đến hạn ôn</p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-4">
+        <button onClick={() => startSession('mcq')} className={`p-6 rounded-2xl flex flex-col items-center gap-2 transition-transform hover:scale-105 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+          <CheckCircle className="w-8 h-8 text-green-500" />
+          <span className="font-semibold">Trắc Nghiệm</span>
+        </button>
+        <button onClick={() => startSession('flashcard')} className={`p-6 rounded-2xl flex flex-col items-center gap-2 transition-transform hover:scale-105 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+          <FlipHorizontal className="w-8 h-8 text-purple-500" />
+          <span className="font-semibold">Thẻ Lật 3D</span>
+        </button>
+      </div>
+
+      <div className={`p-4 rounded-2xl flex flex-wrap gap-3 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <button 
+          onClick={() => setAutoSpeak(!autoSpeak)} 
+          className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm ${autoSpeak ? 'bg-blue-500 text-white' : darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}
+        >
+          {autoSpeak ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          {autoSpeak ? 'Tự động đọc' : 'Tắt đọc'}
+        </button>
+        <button 
+          onClick={() => setShowRoman(!showRoman)} 
+          className={`flex items-center gap-2 px-3 py-2 rounded-xl text-sm ${showRoman ? 'bg-blue-500 text-white' : darkMode ? 'bg-gray-700' : 'bg-gray-100'}`}
+        >
+          {showRoman ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+          {showRoman ? 'Hiện Roman' : 'Ẩn Roman'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function McqView({ sessionWords, currentIndex, mcqOptions, selectedAnswer, handleMcqAnswer, sessionStats, darkMode, setCurrentView }) {
+  if (!sessionWords.length || currentIndex >= sessionWords.length) return null;
+  const currentWord = sessionWords[currentIndex];
+  
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <button onClick={() => setCurrentView('dashboard')} className="flex items-center gap-1 text-sm opacity-70">
+          <ChevronLeft className="w-4 h-4" /> Thoát
+        </button>
+        <span className="text-sm font-medium">{currentIndex + 1}/{sessionWords.length}</span>
+        <span className="text-sm text-green-600">Đúng: {sessionStats.correct}</span>
+      </div>
+
+      <div className={`p-8 rounded-3xl text-center ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <p className="text-3xl font-bold mb-4">{currentWord.vi}</p>
+        <p className="text-lg opacity-70">Chọn nghĩa tiếng Hàn đúng:</p>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        {mcqOptions.map(opt => {
+          const isCorrect = opt.id === currentWord.id;
+          const isSelected = selectedAnswer === opt.id;
+          let btnClass = darkMode ? 'bg-gray-800 hover:bg-gray-700' : 'bg-white hover:bg-gray-50 shadow';
+          if (selectedAnswer) {
+            if (isCorrect) btnClass = 'bg-green-500 text-white';
+            else if (isSelected) btnClass = 'bg-red-500 text-white';
+          }
+          return (
+            <button
+              key={opt.id}
+              onClick={() => handleMcqAnswer(opt.id)}
+              disabled={selectedAnswer !== null}
+              className={`p-4 rounded-xl font-semibold text-lg transition-all ${btnClass} ${selectedAnswer ? 'cursor-default' : 'cursor-pointer'}`}
+            >
+              {opt.ko}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function FlashcardView({ sessionWords, currentIndex, isFlipped, flipCard, handleFlashcardResult, sessionStats, darkMode, showRoman, speak, autoSpeak, setCurrentView }) {
+  if (!sessionWords.length || currentIndex >= sessionWords.length) return null;
+  const currentWord = sessionWords[currentIndex];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex justify-between items-center">
+        <button onClick={() => setCurrentView('dashboard')} className="flex items-center gap-1 text-sm opacity-70">
+          <ChevronLeft className="w-4 h-4" /> Thoát
+        </button>
+        <span className="text-sm font-medium">{currentIndex + 1}/{sessionWords.length}</span>
+        <span className="text-sm text-green-600">Đúng: {sessionStats.correct}</span>
+      </div>
+
+      {/* 3D FLIP CARD */}
+      <div className="perspective-1000 w-full h-64 cursor-pointer" onClick={flipCard}>
+        <div className={`relative w-full h-full transition-transform duration-700 transform-style-3d ${isFlipped ? 'rotate-y-180' : ''}`}>
+          {/* FRONT */}
+          <div className={`absolute w-full h-full rounded-3xl backface-hidden flex flex-col items-center justify-center p-6 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-xl'}`}>
+            <p className="text-4xl font-bold mb-4">{currentWord.vi}</p>
+            <p className="text-lg opacity-70">{currentWord.en}</p>
+            <p className="text-sm mt-4 opacity-50">Chạm để lật</p>
+          </div>
+          {/* BACK */}
+          <div className={`absolute w-full h-full rounded-3xl backface-hidden rotate-y-180 flex flex-col items-center justify-center p-6 ${darkMode ? 'bg-gray-700' : 'bg-purple-50 shadow-xl'}`}>
+            <p className="text-4xl font-bold mb-2 text-purple-600">{currentWord.ko}</p>
+            {showRoman && <p className="text-lg opacity-70">{currentWord.roman}</p>}
+            <button 
+              onClick={(e) => { e.stopPropagation(); speak(currentWord.ko); }}
+              className="mt-4 p-2 rounded-full bg-purple-100 text-purple-600"
+            >
+              <Volume2 className="w-6 h-6" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {isFlipped && (
+        <div className="flex gap-4 justify-center">
+          <button 
+            onClick={() => handleFlashcardResult(false)}
+            className="px-8 py-3 bg-red-500 text-white rounded-xl font-semibold flex items-center gap-2 hover:bg-red-600"
+          >
+            <XCircle className="w-5 h-5" /> Sai
+          </button>
+          <button 
+            onClick={() => handleFlashcardResult(true)}
+            className="px-8 py-3 bg-green-500 text-white rounded-xl font-semibold flex items-center gap-2 hover:bg-green-600"
+          >
+            <CheckCircle className="w-5 h-5" /> Đúng
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiAddView({ aiInput, setAiInput, handleAIAddWord, aiResult, loading, darkMode, setCurrentView }) {
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-bold">AI Thêm Từ Tự Động</h2>
+      <div className={`p-4 rounded-2xl ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <p className="mb-3 text-sm opacity-70">Nhập từ tiếng Việt, AI sẽ dịch và phân loại chủ đề.</p>
+        <div className="flex gap-2">
+          <input
+            type="text"
+            placeholder="VD: quả táo, bác sĩ..."
+            value={aiInput}
+            onChange={(e) => setAiInput(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && handleAIAddWord()}
+            className={`flex-1 px-4 py-3 rounded-xl border focus:outline-none ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}
+          />
+          <button
+            onClick={handleAIAddWord}
+            disabled={loading || !aiInput.trim()}
+            className="px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl flex items-center gap-2 disabled:opacity-50"
+          >
+            {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
+          </button>
+        </div>
+      </div>
+
+      {aiResult && (
+        <div className={`p-4 rounded-2xl ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+          <h3 className="font-semibold mb-2">Kết quả:</h3>
+          <p><span className="font-medium">{aiResult.vi}</span> → {aiResult.ko} ({aiResult.roman})</p>
+          <p className="text-sm opacity-70">Chủ đề: {aiResult.topic}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiPathView({ vocabList, handleAIPathAnalysis, aiPathAnalysis, loading, darkMode, setCurrentView }) {
+  const mastered = vocabList.filter(w => w.level >= 3).length;
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-bold">Lộ Trình AI Cá Nhân</h2>
+      <div className={`p-4 rounded-2xl ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <p className="mb-2">📊 Tổng số từ: {vocabList.length}</p>
+        <p className="mb-2">🎯 Đã thuộc (Level ≥3): {mastered}</p>
+        <p className="mb-4">📚 Chủ đề: {[...new Set(vocabList.map(w => w.topic))].join(', ') || 'Chưa có'}</p>
+        <button
+          onClick={handleAIPathAnalysis}
+          disabled={loading}
+          className="w-full py-3 bg-gradient-to-r from-green-600 to-teal-600 text-white rounded-xl flex items-center justify-center gap-2 disabled:opacity-50"
+        >
+          {loading ? <RefreshCw className="w-5 h-5 animate-spin" /> : <Brain className="w-5 h-5" />}
+          Phân Tích & Đề Xuất Lộ Trình
+        </button>
+      </div>
+
+      {aiPathAnalysis && (
+        <div className={`p-4 rounded-2xl whitespace-pre-line ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+          {aiPathAnalysis}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CloudSyncView({ binId, setBinId, pushToCloud, pullFromCloud, copyToClipboard, jsonImportStr, setJsonImportStr, importFromClipboard, loading, darkMode, setCurrentView }) {
+  return (
+    <div className="space-y-6">
+      <h2 className="text-2xl font-bold">Đồng Bộ Đám Mây</h2>
+      
+      <div className={`p-4 rounded-2xl space-y-3 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <h3 className="font-semibold">JSONBin.io</h3>
+        <input
+          type="text"
+          placeholder="Nhập Bin ID"
+          value={binId}
+          onChange={(e) => setBinId(e.target.value)}
+          className={`w-full px-4 py-3 rounded-xl border focus:outline-none ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}
+        />
+        <div className="flex gap-3">
+          <button onClick={pushToCloud} disabled={loading} className="flex-1 py-3 bg-blue-600 text-white rounded-xl flex items-center justify-center gap-2">
+            <Upload className="w-5 h-5" /> Tải Lên
+          </button>
+          <button onClick={pullFromCloud} disabled={loading} className="flex-1 py-3 bg-green-600 text-white rounded-xl flex items-center justify-center gap-2">
+            <Download className="w-5 h-5" /> Tải Về
+          </button>
+        </div>
+      </div>
+
+      <div className={`p-4 rounded-2xl space-y-3 ${darkMode ? 'bg-gray-800' : 'bg-white shadow-lg'}`}>
+        <h3 className="font-semibold">Xuất/Nhập Thủ Công</h3>
+        <button onClick={copyToClipboard} className="w-full py-3 bg-purple-600 text-white rounded-xl flex items-center justify-center gap-2">
+          <Copy className="w-5 h-5" /> Sao Chép JSON
+        </button>
+        <textarea
+          placeholder="Dán chuỗi JSON vào đây..."
+          value={jsonImportStr}
+          onChange={(e) => setJsonImportStr(e.target.value)}
+          className={`w-full h-24 px-4 py-3 rounded-xl border focus:outline-none ${darkMode ? 'bg-gray-700 border-gray-600' : 'bg-white border-gray-200'}`}
+        />
+        <button onClick={importFromClipboard} className="w-full py-3 bg-orange-600 text-white rounded-xl flex items-center justify-center gap-2">
+          <RefreshCw className="w-5 h-5" /> Nhập Dữ Liệu
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function NavItem({ icon, label, active, onClick }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`flex flex-col items-center gap-1 px-3 py-2 rounded-xl transition-colors ${
+        active ? 'text-blue-600 bg-blue-50' : 'opacity-60 hover:opacity-100'
+      }`}
+    >
+      {icon}
+      <span className="text-xs font-medium">{label}</span>
+    </button>
+  );
+}
